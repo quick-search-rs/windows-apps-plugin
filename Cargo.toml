@@ -11,15 +11,16 @@ crate-type = ["cdylib",'rlib']
 
 [features]
 default = []
-uwp = ["dep:windows", "dep:is_elevated"]
+uwp = ["dep:windows", "dep:is_elevated", "dep:winapi"]
 
 [dependencies]
 quick-search-lib = { git = "https://github.com/quick-search-rs/quick-search-lib" }
 abi_stable = "0.11.3"
 log = "0.4.20"
-opener = "0.6.1"
-winapi = "0.3.9"
+winapi = { version = "0.3.9", optional = true }
 is_elevated = { version = "0.1.2", optional = true }
+env_logger = "0.11.2"
+opener = "0.6.1"
 
 [dependencies.windows]
 version = "0.53.0"

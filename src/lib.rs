@@ -15,6 +15,9 @@ static NAME: &str = "Windows Apps";
 
 #[export_root_module]
 pub fn get_library() -> SearchLib_Ref {
+    if std::env::var("RUST_LOG").map(|s| s == "trace").unwrap_or(false) {
+        env_logger::init();
+    }
     SearchLib { get_searchable }.leak_into_prefix()
 }
 
@@ -106,12 +109,12 @@ impl Searchable for WindowsApps {
 
         let extra_info = extra_info.collect::<Vec<&str>>().join(":");
 
-        match extra_info.as_str() {
+        match prefix {
             "pth" => {
-                log::info!("opening file: {}", result.extra_info());
+                log::info!("opening file: {}", extra_info);
 
                 let path = {
-                    match std::path::PathBuf::from_str(result.extra_info()) {
+                    match std::path::PathBuf::from_str(&extra_info) {
                         Ok(p) => p,
                         Err(e) => {
                             log::error!("failed to get path: {}", e);
@@ -128,11 +131,12 @@ impl Searchable for WindowsApps {
                     log::info!("opened file");
                 }
             }
+            #[cfg(feature = "uwp")]
             "uwp" => {
-                log::info!("opening UWP app: {}", result.extra_info());
+                log::info!("opening UWP app: {}", extra_info);
                 // open UWP app
             }
-            _ => {
+            prefix => {
                 log::error!("unknown prefix: {}", prefix);
             }
         }
