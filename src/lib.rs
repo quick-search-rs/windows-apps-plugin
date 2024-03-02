@@ -1,6 +1,6 @@
 // NOTE: UWP APPS ARE A FEATURE FLAG BECAUSE I CAN'T LIST THEM WITHOUT ADMINISTRATOR RIGHTS BUT IF WE HAVE ADMINISTRATOR RIGHTS THEN OPENING FILES DOESN'T WORK
 
-use std::str::FromStr;
+use std::{env::VarError, str::FromStr};
 
 use abi_stable::{
     export_root_module,
@@ -9,7 +9,7 @@ use abi_stable::{
     sabi_trait::prelude::TD_Opaque,
     std_types::{RBox, RStr, RString, RVec},
 };
-use quick_search_lib::{ColoredChar, PluginId, SearchLib, SearchLib_Ref, SearchResult, Searchable, Searchable_TO};
+use quick_search_lib::{ColoredChar, Log, PluginId, SearchLib, SearchLib_Ref, SearchResult, Searchable, Searchable_TO};
 
 static NAME: &str = "Windows Apps";
 
@@ -22,20 +22,24 @@ pub fn get_library() -> SearchLib_Ref {
 }
 
 #[sabi_extern_fn]
-fn get_searchable(id: PluginId) -> Searchable_TO<'static, RBox<()>> {
-    let this = WindowsApps::new(id);
+fn get_searchable(id: PluginId, logger: quick_search_lib::ScopedLogger) -> Searchable_TO<'static, RBox<()>> {
+    let this = WindowsApps::new(id, logger);
     Searchable_TO::from_value(this, TD_Opaque)
 }
 
-#[derive(Debug, Clone)]
 struct WindowsApps {
     id: PluginId,
     config: quick_search_lib::Config,
+    logger: quick_search_lib::ScopedLogger,
 }
 
 impl WindowsApps {
-    pub fn new(id: PluginId) -> Self {
-        Self { id, config: get_default_config() }
+    pub fn new(id: PluginId, logger: quick_search_lib::ScopedLogger) -> Self {
+        Self {
+            id,
+            config: get_default_config(),
+            logger,
+        }
     }
 }
 
@@ -55,7 +59,12 @@ impl Searchable for WindowsApps {
         }
 
         if include_start_menu_apps {
-            insert_start_menu_apps(&query, return_error_messages, &mut res)
+            if let Err(e) = insert_start_menu_apps(&query, return_error_messages, &mut res) {
+                self.logger.error(&format!("failed to insert start menu apps: {}", e));
+                if return_error_messages {
+                    res.push(SearchResult::new("failed to insert start menu apps").set_context(&format!("{}", e)));
+                }
+            }
         }
         res.sort_by(|a, b| a.title().cmp(b.title()));
         res.dedup_by(|a, b| a.title() == b.title());
@@ -92,7 +101,7 @@ impl Searchable for WindowsApps {
         //         println!("failed to copy to clipboard: {}", s);
         //     }
         // } else {
-        //     log::error!("failed to copy to clipboard: {}", s);
+        //     self.logger.error!("failed to copy to clipboard: {}", s);
         // }
 
         // finish up, above is a clipboard example
@@ -102,7 +111,7 @@ impl Searchable for WindowsApps {
         let prefix = match extra_info.next() {
             Some(p) => p,
             None => {
-                log::error!("failed to get prefix from extra_info");
+                self.logger.error("failed to get prefix from extra_info");
                 return;
             }
         };
@@ -111,33 +120,33 @@ impl Searchable for WindowsApps {
 
         match prefix {
             "pth" => {
-                log::info!("opening file: {}", extra_info);
+                self.logger.info(&format!("opening file: {}", extra_info));
 
                 let path = {
                     match std::path::PathBuf::from_str(&extra_info) {
                         Ok(p) => p,
                         Err(e) => {
-                            log::error!("failed to get path: {}", e);
+                            self.logger.error(&format!("failed to get path: {}", e));
                             return;
                         }
                     }
                 };
 
-                log::trace!("path: {:?}", path);
+                self.logger.trace(&format!("path: {:?}", path));
 
                 if let Err(e) = opener::open(path) {
-                    log::error!("failed to open file: {}", e);
+                    self.logger.error(&format!("failed to open file: {}", e));
                 } else {
-                    log::info!("opened file");
+                    self.logger.info("opened file");
                 }
             }
             #[cfg(feature = "uwp")]
             "uwp" => {
-                log::info!("opening UWP app: {}", extra_info);
+                self.logger.info(&format!("opening UWP app: {}", extra_info));
                 // open UWP app
             }
             prefix => {
-                log::error!("unknown prefix: {}", prefix);
+                self.logger.error(&format!("unknown prefix: {}", prefix));
             }
         }
     }
@@ -152,7 +161,7 @@ impl Searchable for WindowsApps {
     }
 }
 
-fn insert_start_menu_apps(query: &str, return_error_messages: bool, res: &mut Vec<SearchResult>) {
+fn insert_start_menu_apps(query: &str, return_error_messages: bool, res: &mut Vec<SearchResult>) -> Result<(), VarError> {
     // enumerate recursively through the start menu folder: C:\ProgramData\Microsoft\Windows\Start Menu
     // find all .lnk files whos names do not contain "uninstall" (when lowercase)
     // then using the name of the .lnk file (minus the extension) as well as the path to the .lnk file
@@ -163,23 +172,14 @@ fn insert_start_menu_apps(query: &str, return_error_messages: bool, res: &mut Ve
     let start_menu_path = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu");
     recursively_read_folder_for_links(&start_menu_path, &mut entries);
 
-    match std::env::var("APPDATA") {
-        Ok(appdata) => {
-            // %appdata%\Microsoft\Windows\Start Menu\Programs
-            let mut path = std::path::PathBuf::from(appdata);
-            path.push("Microsoft");
-            path.push("Windows");
-            path.push("Start Menu");
-            path.push("Programs");
-            recursively_read_folder_for_links(&path, &mut entries);
-        }
-        Err(e) => {
-            log::error!("failed to get APPDATA: {}", e);
-            if return_error_messages {
-                res.push(SearchResult::new("failed to get APPDATA env var").set_context(&format!("{}", e)));
-            }
-        }
-    }
+    let appdata = std::env::var("APPDATA")?;
+    // %appdata%\Microsoft\Windows\Start Menu\Programs
+    let mut path = std::path::PathBuf::from(appdata);
+    path.push("Microsoft");
+    path.push("Windows");
+    path.push("Start Menu");
+    path.push("Programs");
+    recursively_read_folder_for_links(&path, &mut entries);
 
     // filter out uninstall links and invalid links, as well as links that do not contain the query
     entries.retain(|p| {
@@ -213,12 +213,13 @@ fn insert_start_menu_apps(query: &str, return_error_messages: bool, res: &mut Ve
         };
         res.push(SearchResult::new(title).set_context(context).set_extra_info(&(String::from("pth:") + context)));
     }
+    Ok(())
 }
 
 #[cfg(feature = "uwp")]
 fn insert_uwp_apps(query: &str, return_error_messages: bool, res: &mut Vec<SearchResult>) {
     if !is_elevated::is_elevated() {
-        log::error!("no administrator rights");
+        self.logger.error(&format!("no administrator rights"));
         if return_error_messages {
             res.push(SearchResult::new("no administrator rights").set_context("try running as administrator"));
         }
@@ -228,7 +229,7 @@ fn insert_uwp_apps(query: &str, return_error_messages: bool, res: &mut Vec<Searc
     let pacman = match windows::Management::Deployment::PackageManager::new() {
         Ok(p) => p,
         Err(e) => {
-            log::error!("failed to get PackageManager: {}", e);
+            self.logger.error(&format!("failed to get PackageManager: {}", e));
             if return_error_messages {
                 res.push(SearchResult::new("failed to get PackageManager from windows_api").set_context(&format!("{}", e)));
             }
@@ -239,7 +240,7 @@ fn insert_uwp_apps(query: &str, return_error_messages: bool, res: &mut Vec<Searc
     let packages = match pacman.FindPackages() {
         Ok(p) => p,
         Err(e) => {
-            log::error!("failed to get packages: {}", e);
+            self.logger.error(&format!("failed to get packages: {}", e));
             if return_error_messages {
                 res.push(SearchResult::new("failed to get packages from PackageManager").set_context(&format!("{}", e)));
             }
@@ -251,7 +252,7 @@ fn insert_uwp_apps(query: &str, return_error_messages: bool, res: &mut Vec<Searc
         let name = match package.DisplayName().map(|d| d.to_string()) {
             Ok(n) => n,
             Err(e) => {
-                log::error!("failed to get DisplayName: {}", e);
+                self.logger.error(&format!("failed to get DisplayName: {}", e));
                 if return_error_messages {
                     res.push(SearchResult::new("failed to get DisplayName from package").set_context(&format!("{}", e)));
                 }
@@ -266,7 +267,7 @@ fn insert_uwp_apps(query: &str, return_error_messages: bool, res: &mut Vec<Searc
         let description = match package.Description().map(|d| d.to_string()) {
             Ok(d) => d,
             Err(e) => {
-                log::error!("failed to get Description: {}", e);
+                self.logger.error(&format!("failed to get Description: {}", e));
                 if return_error_messages {
                     res.push(SearchResult::new("failed to get Description from package").set_context(&format!("{}", e)));
                 }
